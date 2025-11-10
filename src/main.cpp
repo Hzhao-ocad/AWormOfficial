@@ -1,140 +1,108 @@
 #include <Arduino.h>
-#include <WebGUI.h>
+#include <stdint.h>
 
-// ESP32-S3 onboard RGB LED pin (WS2812/Neopixel)
-#define LED_PIN 48  // GPIO48 for ESP32-S3 onboard RGB LED
+// Writes an increasing random number to Serial until it reaches 50,000,000,000.
+// The increments slowly grow as the value grows so the numbers trend upward.
 
-// Access Point credentials - ESP32 will create its own WiFi network
-const char* AP_SSID = "ESP32-RGB-LED";
-const char* AP_PASSWORD = "";  // Empty string = Open WiFi (no password)
+static uint64_t value = 0ULL;
+static const uint64_t MAX_VALUE = 50000000000ULL; // 50 billion
 
-// GUI Elements - Sliders for RGB control
-Slider redSlider("Red", 20, 50, 0, 255, 0);
-Slider greenSlider("Green", 20, 120, 0, 255, 0);
-Slider blueSlider("Blue", 20, 190, 0, 255, 0);
+// Convert uint64_t to a null-terminated decimal string (no libc %llu reliance).
+// Returns an Arduino String for easy Serial.print usage.
+String u64ToString(uint64_t v) {
+	if (v == 0) return String("0");
+	char buf[32];
+	buf[31] = '\0';
+	int pos = 30;
+	while (v > 0 && pos >= 0) {
+		uint8_t digit = (uint8_t)(v % 10ULL);
+		buf[pos--] = '0' + digit;
+		v /= 10ULL;
+	}
+	return String(&buf[pos + 1]);
+}
 
-// Preset color buttons
-Button offButton("OFF", 20, 270, 80);
-Button redButton("Red", 110, 270, 80);
-Button greenButton("Green", 200, 270, 80);
-Button blueButton("Blue", 290, 270, 80);
-Button whiteButton("White", 20, 320, 80);
-Button purpleButton("Purple", 110, 320, 80);
-Button yellowButton("Yellow", 200, 320, 80);
-Button cyanButton("Cyan", 290, 320, 80);
+// Return a human-readable label like "12.3 thousand", "4 million", "2.5 billion".
+String humanReadable(uint64_t v) {
+	if (v < 1000ULL) return String(u64ToString(v));
+	const char* suffix[] = {"thousand", "million", "billion", "trillion"};
+	double scaled = (double)v;
+	int idx = 0;
+	// Scale down by thousands until we land in the correct suffix bucket
+	while (scaled >= 1000.0 && idx < 4) {
+		scaled /= 1000.0;
+		idx++;
+	}
+	if (idx == 0) return String(u64ToString(v));
+	int sufIndex = idx - 1;
+	int decimals = (scaled < 10.0) ? 1 : 0;
+	// Use Arduino String formatting for floats: String(value, decimals)
+	String out = String((float)scaled, decimals);
+	out += " ";
+	out += suffix[sufIndex];
+	return out;
+}
 
-// Function to update LED color
-void updateLED() {
-  int r = redSlider.getIntValue();
-  int g = greenSlider.getIntValue();
-  int b = blueSlider.getIntValue();
-  neopixelWrite(LED_PIN, r, g, b);
+// Return a string of exclamation marks proportional to the value (0..20)
+String exclamationMarks(uint64_t v) {
+	uint32_t count = 0;
+	if (v > 0) {
+		count = (uint32_t)((v * 20ULL) / MAX_VALUE);
+		if (count > 20U) count = 20U;
+	}
+	String s = "";
+	for (uint32_t i = 0; i < count; ++i) s += "!";
+	return s;
 }
 
 void setup() {
-  Serial.begin(115200);
-  delay(1000);
-  
-  Serial.println("ESP32-S3 RGB LED Web Control");
-  
-  // Initialize the onboard LED
-  pinMode(LED_PIN, OUTPUT);
-  neopixelWrite(LED_PIN, 0, 0, 0); // Turn off initially
-  
-  // Start Access Point mode - ESP32 will create its own WiFi network
-  Serial.println("Starting Access Point...");
-  GUI.startAP(AP_SSID, AP_PASSWORD);
-  
-  Serial.println("===============================================");
-  Serial.println("   ESP32-S3 RGB LED Controller - AP Mode");
-  Serial.println("===============================================");
-  Serial.print("   WiFi Network: ");
-  Serial.println(AP_SSID);
-  Serial.println("   WiFi Password: OPEN (No Password)");
-  Serial.println("   IP Address: http://192.168.4.1");
-  Serial.println("===============================================");
-  Serial.println("1. Connect your phone/computer to the WiFi");
-  Serial.println("2. Open browser and go to: http://192.168.4.1");
-  Serial.println("===============================================");
-  
-  // Configure the web interface
-  GUI.setTitle("ESP32-S3 RGB LED Controller");
-  
-  // Add RGB sliders to the interface
-  GUI.addElement(&redSlider);
-  GUI.addElement(&greenSlider);
-  GUI.addElement(&blueSlider);
-  
-  // Add preset color buttons
-  GUI.addElement(&offButton);
-  GUI.addElement(&redButton);
-  GUI.addElement(&greenButton);
-  GUI.addElement(&blueButton);
-  GUI.addElement(&whiteButton);
-  GUI.addElement(&purpleButton);
-  GUI.addElement(&yellowButton);
-  GUI.addElement(&cyanButton);
-  
-  // Start the web server
-  GUI.begin();
-  
-  Serial.println("Setup complete!");
-  Serial.println("Control the LED from your browser!");
+	Serial.begin(115200);
+	// Give the serial some time
+	delay(50);
+	// Try to seed the RNG with analog noise if available.
+	// If analogRead is not available or floating, we also mix in micros().
+#if defined(ANALOG_INPUT)
+	randomSeed(analogRead(A0) ^ (uint32_t)micros());
+#else
+	randomSeed((uint32_t)micros());
+#endif
+	Serial.println("Starting increasing-random generator (max 50,000,000,000)");
 }
 
 void loop() {
-  // Update WebGUI (process web requests)
-  GUI.update();
-  
-  // Handle preset button presses
-  if (offButton.wasPressed()) {
-    redSlider.setValue(0);
-    greenSlider.setValue(0);
-    blueSlider.setValue(0);
-  }
-  
-  if (redButton.wasPressed()) {
-    redSlider.setValue(255);
-    greenSlider.setValue(0);
-    blueSlider.setValue(0);
-  }
-  
-  if (greenButton.wasPressed()) {
-    redSlider.setValue(0);
-    greenSlider.setValue(255);
-    blueSlider.setValue(0);
-  }
-  
-  if (blueButton.wasPressed()) {
-    redSlider.setValue(0);
-    greenSlider.setValue(0);
-    blueSlider.setValue(255);
-  }
-  
-  if (whiteButton.wasPressed()) {
-    redSlider.setValue(255);
-    greenSlider.setValue(255);
-    blueSlider.setValue(255);
-  }
-  
-  if (purpleButton.wasPressed()) {
-    redSlider.setValue(128);
-    greenSlider.setValue(0);
-    blueSlider.setValue(128);
-  }
-  
-  if (yellowButton.wasPressed()) {
-    redSlider.setValue(255);
-    greenSlider.setValue(255);
-    blueSlider.setValue(0);
-  }
-  
-  if (cyanButton.wasPressed()) {
-    redSlider.setValue(0);
-    greenSlider.setValue(255);
-    blueSlider.setValue(255);
-  }
-  
-  // Update LED with current slider values
-  updateLED();
+	if (value >= MAX_VALUE) {
+		Serial.println("Reached max value. Stopping updates.");
+		while (true) {
+			delay(1000);
+		}
+	}
+
+	// Base random increment from 1..999,999 (larger so 2s holds become possible)
+	uint64_t base = (uint64_t)random(1, 10000000000);
+	// Growth term so increments increase as value grows (value / 1,000,000)
+	uint64_t growth = value / 1000000ULL;
+	uint64_t increment = base + growth;
+
+	// Prevent overshoot beyond MAX_VALUE
+	if (value + increment > MAX_VALUE) {
+		increment = MAX_VALUE - value;
+	}
+
+		value += increment;
+
+			// Print the number as decimal (portable) plus human-readable label and excitement
+			String label = humanReadable(value);
+			String bangs = exclamationMarks(value);
+			Serial.println(u64ToString(value) + " (" + label + ") " + bangs);
+
+		// Compute a delay based on the delta (increment) value.
+		// Larger increments produce a longer wait to build suspense. The delay
+		// is clamped to a minimum and a maximum (max 2000 ms as requested).
+	// We estimate a reasonable maximum expected increment based on the
+	// current growth formula: growth ~= MAX_VALUE / 1,000,000, plus base up to ~1,000,000.
+	const uint64_t expected_max_increment = (MAX_VALUE / 10000000000ULL) + 10000000000ULL;
+		uint32_t wait_ms = (uint32_t)((increment * 2000ULL) / expected_max_increment);
+		if (wait_ms > 2000U) wait_ms = 2000U;
+		if (wait_ms < 20U) wait_ms = 20U; // avoid zero/too-fast prints
+		delay(wait_ms);
 }
