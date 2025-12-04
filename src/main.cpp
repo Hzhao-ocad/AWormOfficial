@@ -1,108 +1,130 @@
 #include <Arduino.h>
-#include <stdint.h>
+#include <WebGUI.h>
+#include "servo_control.h"
+#include "bmi160_control.h"
+#include "ldr_control.h"
+#include "cap1188_control.h"
 
-// Writes an increasing random number to Serial until it reaches 50,000,000,000.
-// The increments slowly grow as the value grows so the numbers trend upward.
+// WiFi credentials - CHANGE THESE TO YOUR NETWORK
+const char* ssid = "Xiaomi_7E62";
+const char* password = "12345678";
 
-static uint64_t value = 0ULL;
-static const uint64_t MAX_VALUE = 50000000000ULL; // 50 billion
+ServoControl servos;
+BMI160Control bmi160;
+LDRControl ldrSensors;
 
-// Convert uint64_t to a null-terminated decimal string (no libc %llu reliance).
-// Returns an Arduino String for easy Serial.print usage.
-String u64ToString(uint64_t v) {
-	if (v == 0) return String("0");
-	char buf[32];
-	buf[31] = '\0';
-	int pos = 30;
-	while (v > 0 && pos >= 0) {
-		uint8_t digit = (uint8_t)(v % 10ULL);
-		buf[pos--] = '0' + digit;
-		v /= 10ULL;
-	}
-	return String(&buf[pos + 1]);
-}
+// Create speed slider (-100 to 100, default 0)
+Slider speedSlider("Speed", 20, 50, -100, 100, 0);
 
-// Return a human-readable label like "12.3 thousand", "4 million", "2.5 billion".
-String humanReadable(uint64_t v) {
-	if (v < 1000ULL) return String(u64ToString(v));
-	const char* suffix[] = {"thousand", "million", "billion", "trillion"};
-	double scaled = (double)v;
-	int idx = 0;
-	// Scale down by thousands until we land in the correct suffix bucket
-	while (scaled >= 1000.0 && idx < 4) {
-		scaled /= 1000.0;
-		idx++;
-	}
-	if (idx == 0) return String(u64ToString(v));
-	int sufIndex = idx - 1;
-	int decimals = (scaled < 10.0) ? 1 : 0;
-	// Use Arduino String formatting for floats: String(value, decimals)
-	String out = String((float)scaled, decimals);
-	out += " ";
-	out += suffix[sufIndex];
-	return out;
-}
-
-// Return a string of exclamation marks proportional to the value (0..20)
-String exclamationMarks(uint64_t v) {
-	uint32_t count = 0;
-	if (v > 0) {
-		count = (uint32_t)((v * 20ULL) / MAX_VALUE);
-		if (count > 20U) count = 20U;
-	}
-	String s = "";
-	for (uint32_t i = 0; i < count; ++i) s += "!";
-	return s;
-}
-
+/*
+21 SDA I2C Bus (CAP1188, BMI160, Ambient, ToF)
+22 SCL I2C Bus
+25 DAC/AudioSpeaker via EK1236
+26 PWM Servo 1
+27 PWM Servo 2
+34 ADC LDR 3
+35 ADC LDR 4
+36 (VP)ADCLDR 1
+39 (VN)ADCLDR 2
+*/
 void setup() {
-	Serial.begin(115200);
-	// Give the serial some time
-	delay(50);
-	// Try to seed the RNG with analog noise if available.
-	// If analogRead is not available or floating, we also mix in micros().
-#if defined(ANALOG_INPUT)
-	randomSeed(analogRead(A0) ^ (uint32_t)micros());
-#else
-	randomSeed((uint32_t)micros());
-#endif
-	Serial.println("Starting increasing-random generator (max 50,000,000,000)");
+    Serial.begin(115200);
+    
+    // Connect to WiFi
+    Serial.println("Connecting to WiFi...");
+    if (!GUI.connectWiFi(ssid, password)) {
+        Serial.println("WiFi connection failed! Starting AP mode...");
+        GUI.startAP("WormControl", "worm1234");
+    }
+    
+    Serial.println("");
+    Serial.println("WiFi connected!");
+    Serial.print("IP Address: ");
+    Serial.println(GUI.getIP());
+    
+    // Configure web interface
+    GUI.setTitle("AWorm Controller");
+    
+    // Add speed slider to web interface
+    GUI.addElement(&speedSlider);
+    
+    // Start web server
+    GUI.begin();
+    
+    Serial.println("Web server started!");
+    Serial.print("Open http://");
+    Serial.print(GUI.getIP());
+    Serial.println(" in your browser");
+    
+    Serial.println("Initializing servos...");
+    servos.init();
+    Serial.println("Servos initialized!");
+    
+    Serial.println("Initializing BMI160...");
+    if (!bmi160.init()) {
+        Serial.println("BMI160 initialization failed!");
+    }
+    
+    Serial.println("Initializing LDR sensors...");
+    ldrSensors.init();
+    
+    Serial.println("Initializing CAP1188...");
+    initCAP1188();
+    Serial.println("CAP1188 initialized!");
 }
 
 void loop() {
-	if (value >= MAX_VALUE) {
-		Serial.println("Reached max value. Stopping updates.");
-		while (true) {
-			delay(1000);
-		}
-	}
+    // Handle WebGUI updates
+    GUI.update();
+    
+    // Update servo speed based on web slider
+    static int lastSpeed = 0;
+    int currentSpeed = speedSlider.getIntValue();
+    if (currentSpeed != lastSpeed) {
+        servos.move(currentSpeed);
+        Serial.print("Speed changed to: ");
+        Serial.println(currentSpeed);
+        lastSpeed = currentSpeed;
+    }
+    
+    // Update BMI160 sensor data
+    bmi160.update();
+    
+    // Update LDR sensor data
+    ldrSensors.update();
+    
+    // Update CAP1188 sensor data
+    readCAP1188();
+    
+    static unsigned long lastPrint = 0;
+    if (millis() - lastPrint > 1000) {
+        Serial.print("Yaw: "); Serial.print(yaw);
+        Serial.print(" | Pitch: "); Serial.print(pitch);
+        Serial.print(" | Roll: "); Serial.println(roll);
+        Serial.print(" | LDR1: "); Serial.print(ldr1);
+        Serial.print(" | LDR2: "); Serial.print(ldr2);
+        Serial.print(" | LDR3: "); Serial.print(ldr3);
+        Serial.print(" | LDR4: "); Serial.println(ldr4);
+		Serial.print(" | cap1: "); Serial.print(cap1Triggered);
+		Serial.print(" | cap2: "); Serial.print(cap2Triggered);
+		Serial.print(" | cap3: "); Serial.print(cap3Triggered);
+		Serial.print(" | cap4: "); Serial.print(cap4Triggered);
+		Serial.print(" | cap5: "); Serial.print(cap5Triggered);
+		Serial.print(" | cap6: "); Serial.print(cap6Triggered);
+		Serial.print(" | cap7: "); Serial.print(cap7Triggered);
+		Serial.print(" | cap8: "); Serial.println(cap8Triggered);
+        lastPrint = millis();
 
-	// Base random increment from 1..999,999 (larger so 2s holds become possible)
-	uint64_t base = (uint64_t)random(1, 10000000000);
-	// Growth term so increments increase as value grows (value / 1,000,000)
-	uint64_t growth = value / 1000000ULL;
-	uint64_t increment = base + growth;
-
-	// Prevent overshoot beyond MAX_VALUE
-	if (value + increment > MAX_VALUE) {
-		increment = MAX_VALUE - value;
-	}
-
-		value += increment;
-
-			// Print the number as decimal (portable) plus human-readable label and excitement
-			String label = humanReadable(value);
-			String bangs = exclamationMarks(value);
-			Serial.println(u64ToString(value) + " (" + label + ") " + bangs);
-
-		// Compute a delay based on the delta (increment) value.
-		// Larger increments produce a longer wait to build suspense. The delay
-		// is clamped to a minimum and a maximum (max 2000 ms as requested).
-	// We estimate a reasonable maximum expected increment based on the
-	// current growth formula: growth ~= MAX_VALUE / 1,000,000, plus base up to ~1,000,000.
-	const uint64_t expected_max_increment = (MAX_VALUE / 10000000000ULL) + 10000000000ULL;
-		uint32_t wait_ms = (uint32_t)((increment * 2000ULL) / expected_max_increment);
-		if (wait_ms > 2000U) wait_ms = 2000U;
-		if (wait_ms < 20U) wait_ms = 20U; // avoid zero/too-fast prints
-		delay(wait_ms);
+	// 	static unsigned long lastCalibrate = 0;
+	// 	if (millis() - lastCalibrate > 30000) {
+	// 		bmi160.recalibrate();
+	// 		Serial.println("BMI160 recalibrated");
+	// 		lastCalibrate = millis();
+	// 	}
+    }
+	
+    
+    // To recalibrate yaw, call: bmi160.recalibrate();
+    
+    delay(10); // Update at ~100Hz
 }
