@@ -4,17 +4,25 @@
 #include "bmi160_control.h"
 #include "ldr_control.h"
 #include "cap1188_control.h"
+#include "webservo.h"
 
 // WiFi credentials - CHANGE THESE TO YOUR NETWORK
-const char* ssid = "Xiaomi_7E62";
+const char* ssid = "Xiaomi_7E61";
 const char* password = "12345678";
 
 ServoControl servos;
 BMI160Control bmi160;
 LDRControl ldrSensors;
+WebServo webServo;
 
 // Create speed slider (-100 to 100, default 0)
 Slider speedSlider("Speed", 20, 50, -100, 100, 0);
+
+// Create target yaw slider (-180 to 180, default 0)
+Slider targetYawSlider("Target Yaw", 20, 120, -180, 180, 0);
+
+// Display for current yaw error
+SensorStatus yawErrorDisplay("Yaw Error", 20, 190);
 
 /*
 21 SDA I2C Bus (CAP1188, BMI160, Ambient, ToF)
@@ -48,6 +56,10 @@ void setup() {
     // Add speed slider to web interface
     GUI.addElement(&speedSlider);
     
+    // Add target yaw slider and error display
+    GUI.addElement(&targetYawSlider);
+    GUI.addElement(&yawErrorDisplay);
+    
     // Start web server
     GUI.begin();
     
@@ -71,6 +83,9 @@ void setup() {
     Serial.println("Initializing CAP1188...");
     initCAP1188();
     Serial.println("CAP1188 initialized!");
+    
+    // Initialize web sensor displays and canvas
+    webServo.init();
 }
 
 void loop() {
@@ -87,6 +102,37 @@ void loop() {
         lastSpeed = currentSpeed;
     }
     
+    // Target yaw control - turn to reach target direction
+    static float targetYaw = 0;
+    float newTargetYaw = targetYawSlider.getIntValue();
+    if (abs(newTargetYaw - targetYaw) > 0.5) {
+        targetYaw = newTargetYaw;
+        Serial.print("Target yaw changed to: ");
+        Serial.println(targetYaw);
+    }
+    
+    // Calculate yaw error (shortest angle difference)
+    float yawError = targetYaw - yaw;
+    // Normalize to -180 to 180 range
+    while (yawError > 180) yawError -= 360;
+    while (yawError < -180) yawError += 360;
+    
+    // Update yaw error display
+    yawErrorDisplay.setValue(yawError, 1);
+    
+    // Simple proportional control to turn towards target
+    // Positive error = turn right, negative error = turn left
+    const float kP = 2.0; // Proportional gain (adjust for responsiveness)
+    const float deadzone = 2.0; // Don't move if within 2 degrees
+    
+    if (abs(yawError) > deadzone) {
+        int turnSpeed = constrain((int)(kP * yawError), -100, 100);
+        servos.move(turnSpeed);
+    } else {
+        // Stop when close enough to target
+        servos.move(0);
+    }
+    
     // Update BMI160 sensor data
     bmi160.update();
     
@@ -96,15 +142,18 @@ void loop() {
     // Update CAP1188 sensor data
     readCAP1188();
     
+    // Update web sensor displays
+    webServo.updateDisplays();
+    
     static unsigned long lastPrint = 0;
     if (millis() - lastPrint > 1000) {
         Serial.print("Yaw: "); Serial.print(yaw);
         Serial.print(" | Pitch: "); Serial.print(pitch);
         Serial.print(" | Roll: "); Serial.println(roll);
-        Serial.print(" | LDR1: "); Serial.print(ldr1);
-        Serial.print(" | LDR2: "); Serial.print(ldr2);
-        Serial.print(" | LDR3: "); Serial.print(ldr3);
-        Serial.print(" | LDR4: "); Serial.println(ldr4);
+        Serial.print(" | LDR1: "); Serial.print(ldr1_calibrated);
+        Serial.print(" | LDR2: "); Serial.print(ldr2_calibrated);
+        Serial.print(" | LDR3: "); Serial.print(ldr3_calibrated);
+        Serial.print(" | LDR4: "); Serial.println(ldr4_calibrated);
 		Serial.print(" | cap1: "); Serial.print(cap1Triggered);
 		Serial.print(" | cap2: "); Serial.print(cap2Triggered);
 		Serial.print(" | cap3: "); Serial.print(cap3Triggered);
